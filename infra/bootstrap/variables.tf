@@ -8,8 +8,6 @@ variable "state_bucket_name" {
   description = "Name of the S3 bucket to hold Terraform state. S3 bucket names are globally unique, so this must be a name nobody else has taken."
   type        = string
 
-  // S3 rejects uppercase and underscores, and the name must be 3-63 chars.
-  // Catching it here beats finding out at apply time.
   validation {
     condition     = can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.state_bucket_name))
     error_message = "state_bucket_name must be 3-63 characters, lowercase letters, digits, dots or hyphens, and start and end alphanumeric."
