@@ -1,0 +1,113 @@
+name: Terraform
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to apply
+        type: choice
+        options: [dev, prod]
+        default: dev
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+
+  plan:
+    if: github.event_name == 'pull_request'
+    name: Plan (${{ matrix.env }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [dev, prod]
+
+    defaults:
+      run:
+        working-directory: infra/envs/${{ matrix.env }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+
+      - run: terraform fmt -check -recursive ../..
+      - run: terraform init
+      - run: terraform validate
+
+      - id: plan
+        run: terraform plan -refresh=false -no-color -out=tfplan
+
+      - run: terraform show -no-color tfplan > plan.txt
+        if: always()
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: terraform-plan-${{ matrix.env }}
+          path: infra/envs/${{ matrix.env }}/plan.txt
+          retention-days: 14
+
+      - uses: marocchino/sticky-pull-request-comment@v2
+        if: always()
+        with:
+          header: terraform-plan-${{ matrix.env }}
+          message: |
+            ### Terraform plan — `${{ matrix.env }}`
+
+            <details><summary>Show plan</summary>
+
+            ```terraform
+            ${{ steps.plan.outputs.stdout }}
+            ```
+
+            </details>
+
+            _Plan only: no AWS credentials are used and nothing is applied._
+
+  apply:
+    if: github.event_name != 'pull_request'
+    name: Apply (${{ github.event.inputs.environment || 'dev' }})
+    runs-on: ubuntu-latest
+
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    concurrency: terraform-apply-${{ github.event.inputs.environment || 'dev' }}
+
+    defaults:
+      run:
+        working-directory: infra/envs/${{ github.event.inputs.environment || 'dev' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - uses: hashicorp/setup-terraform@v3
+
+ 
+      - run: rm -f backend_override.tf
+      - run: terraform init
+
+      - run: terraform validate
+      
+      - run: terraform plan -no-color -var plan_only=false -out=tfplan
+
+      - run: terraform apply -auto-approve tfplan
+
+      - run: terraform output
