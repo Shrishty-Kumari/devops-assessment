@@ -13,10 +13,19 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: Environment to apply
+        description: Environment
         type: choice
         options: [dev, prod]
         default: dev
+      action:
+        description: What to run
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+      confirm:
+        description: "Destroy only: type the environment name to confirm"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -78,12 +87,12 @@ jobs:
 
   apply:
     if: github.event_name != 'pull_request'
-    name: Apply (${{ github.event.inputs.environment || 'dev' }})
+    name: ${{ github.event.inputs.action || 'apply' }} (${{ github.event.inputs.environment || 'dev' }})
     runs-on: ubuntu-latest
 
     environment: ${{ github.event.inputs.environment || 'dev' }}
 
-    concurrency: terraform-apply-${{ github.event.inputs.environment || 'dev' }}
+    concurrency: terraform-${{ github.event.inputs.environment || 'dev' }}
 
     defaults:
       run:
@@ -92,6 +101,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+
+      - name: Confirm destroy
+        if: github.event.inputs.action == 'destroy'
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "${{ github.event.inputs.environment }}" ]; then
+            echo "::error::To destroy '${{ github.event.inputs.environment }}'," \
+                 "type that name into the confirm box."
+            exit 1
+          fi
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -99,15 +118,22 @@ jobs:
           aws-region: ap-south-1
 
       - uses: hashicorp/setup-terraform@v3
-
- 
+=
       - run: rm -f backend_override.tf
+
       - run: terraform init
 
       - run: terraform validate
-      
-      - run: terraform plan -no-color -var plan_only=false -out=tfplan
 
-      - run: terraform apply -auto-approve tfplan
+      - name: terraform plan
+        run: |
+          terraform plan -no-color -var plan_only=false -out=tfplan \
+            ${{ github.event.inputs.action == 'destroy' && '-destroy' || '' }}
 
-      - run: terraform output
+      - name: terraform apply
+        if: github.event_name == 'push' || github.event.inputs.action == 'apply' || github.event.inputs.action == 'destroy'
+        run: terraform apply -auto-approve tfplan
+
+      - name: terraform output
+        if: github.event.inputs.action != 'destroy'
+        run: terraform output
