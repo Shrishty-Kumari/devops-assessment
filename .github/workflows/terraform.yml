@@ -5,77 +5,116 @@ on:
     paths:
       - "infra/**"
       - ".github/workflows/terraform.yml"
+
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - "infra/**"
       - ".github/workflows/terraform.yml"
+
   workflow_dispatch:
     inputs:
       environment:
         description: Environment
         type: choice
-        options: [dev, prod]
+        options:
+          - dev
+          - prod
         default: dev
+        required: true
+
       action:
         description: What to run
         type: choice
-        options: [plan, apply, destroy]
+        options:
+          - plan
+          - apply
+          - destroy
         default: plan
+        required: true
+
       confirm:
         description: "Destroy only: type the environment name to confirm"
         type: string
         default: ""
+        required: false
 
 permissions:
   contents: read
   pull-requests: write
 
 jobs:
-
   plan:
     if: github.event_name == 'pull_request'
+
     name: Plan (${{ matrix.env }})
+
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
       matrix:
-        env: [dev, prod]
+        env:
+          - dev
+          - prod
 
     defaults:
       run:
         working-directory: infra/envs/${{ matrix.env }}
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
 
-      - run: terraform fmt -check -recursive ../..
-      - run: terraform init
-      - run: terraform validate
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - id: plan
-        run: terraform plan -refresh=false -no-color -out=tfplan
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
 
-      - run: terraform show -no-color tfplan > plan.txt
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive ../..
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -refresh=false \
+            -no-color \
+            -out=tfplan
+
+      - name: Terraform Show Plan
         if: always()
+        run: |
+          if [ -f tfplan ]; then
+            terraform show -no-color tfplan > plan.txt
+          else
+            echo "Terraform plan file was not created." > plan.txt
+          fi
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: terraform-plan-${{ matrix.env }}
           path: infra/envs/${{ matrix.env }}/plan.txt
           retention-days: 14
 
-      - uses: marocchino/sticky-pull-request-comment@v2
+      - name: Comment Terraform Plan
+        uses: marocchino/sticky-pull-request-comment@v2
         if: always()
         with:
           header: terraform-plan-${{ matrix.env }}
           message: |
             ### Terraform plan — `${{ matrix.env }}`
 
-            <details><summary>Show plan</summary>
+            <details>
+            <summary>Show plan</summary>
 
             ```terraform
             ${{ steps.plan.outputs.stdout }}
@@ -83,57 +122,90 @@ jobs:
 
             </details>
 
-            _Plan only: no AWS credentials are used and nothing is applied._
+            _Plan only: no AWS credentials are configured and nothing is applied._
 
   apply:
     if: github.event_name != 'pull_request'
+
     name: ${{ github.event.inputs.action || 'apply' }} (${{ github.event.inputs.environment || 'dev' }})
+
     runs-on: ubuntu-latest
 
-    environment: ${{ github.event.inputs.environment || 'dev' }}
+    environment:
+      name: ${{ github.event.inputs.environment || 'dev' }}
 
-    concurrency: terraform-${{ github.event.inputs.environment || 'dev' }}
+    concurrency:
+      group: terraform-${{ github.event.inputs.environment || 'dev' }}
+      cancel-in-progress: false
 
     defaults:
       run:
         working-directory: infra/envs/${{ github.event.inputs.environment || 'dev' }}
 
     steps:
-      - uses: actions/checkout@v4
 
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Confirm destroy
-        if: github.event.inputs.action == 'destroy'
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
         run: |
           if [ "${{ github.event.inputs.confirm }}" != "${{ github.event.inputs.environment }}" ]; then
-            echo "::error::To destroy '${{ github.event.inputs.environment }}'," \
-                 "type that name into the confirm box."
+            echo "::error::To destroy '${{ github.event.inputs.environment }}', type that environment name into the confirm box."
             exit 1
           fi
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ap-south-1
 
-      - uses: hashicorp/setup-terraform@v3
-=
-      - run: rm -f backend_override.tf
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
 
-      - run: terraform init
+      - name: Remove backend override
+        run: rm -f backend_override.tf
 
-      - run: terraform validate
+      - name: Terraform Init
+        run: terraform init
 
-      - name: terraform plan
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
         run: |
-          terraform plan -no-color -var plan_only=false -out=tfplan \
-            ${{ github.event.inputs.action == 'destroy' && '-destroy' || '' }}
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.action }}" = "destroy" ]; then
+            terraform plan \
+              -no-color \
+              -var="plan_only=false" \
+              -destroy \
+              -out=tfplan
+          else
+            terraform plan \
+              -no-color \
+              -var="plan_only=false" \
+              -out=tfplan
+          fi
 
-      - name: terraform apply
-        if: github.event_name == 'push' || github.event.inputs.action == 'apply' || github.event.inputs.action == 'destroy'
+      - name: Terraform Apply
+        if: |
+          github.event_name == 'push' ||
+          (
+            github.event_name == 'workflow_dispatch' &&
+            (
+              github.event.inputs.action == 'apply' ||
+              github.event.inputs.action == 'destroy'
+            )
+          )
         run: terraform apply -auto-approve tfplan
 
-      - name: terraform output
-        if: github.event.inputs.action != 'destroy'
+      - name: Terraform Output
+        if: |
+          github.event_name == 'push' ||
+          (
+            github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.action != 'destroy'
+          )
         run: terraform output
