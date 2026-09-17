@@ -40,7 +40,6 @@ module "network" {
   vpc_cidr = var.vpc_cidr
   azs      = var.azs
 
-  # dev accepts a single NAT gateway to keep the monthly cost down.
   single_nat_gateway = var.single_nat_gateway
 }
 
@@ -73,10 +72,8 @@ module "rds" {
   name        = local.name
   environment = var.environment
 
-  vpc_id             = module.network.vpc_id
-  private_subnet_ids = module.network.private_subnet_ids
-
-  # This wiring is what restricts database access to the Fargate tasks.
+  vpc_id                = module.network.vpc_id
+  private_subnet_ids    = module.network.private_subnet_ids
   ecs_security_group_id = module.ecs.ecs_security_group_id
 
   db_instance_class     = var.db_instance_class
